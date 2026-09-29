@@ -7,6 +7,7 @@ import { quotesRouter } from "./routes/quotes.js";
 import { optionsRouter } from "./routes/options.js";
 import { portfolioRouter } from "./routes/portfolio.js";
 import { ordersRouter } from "./routes/orders.js";
+import { strategiesRouter } from "./routes/strategies.js";
 
 dotenv.config();
 
@@ -21,18 +22,12 @@ app.use("/api/quotes", quotesRouter);
 app.use("/api/options", optionsRouter);
 app.use("/api/portfolio", portfolioRouter);
 app.use("/api/orders", ordersRouter);
+app.use("/api/strategies", strategiesRouter);
 
 const wss = new WebSocketServer({ server, path: "/ws" });
 
 wss.on("connection", (socket) => {
-  socket.send(
-    JSON.stringify({
-      type: "connected",
-      message: "Market feed connected",
-      timestamp: new Date().toISOString(),
-    })
-  );
-
+  socket.send(JSON.stringify({ type: "connected", message: "Market feed connected", timestamp: new Date().toISOString() }));
   socket.on("message", (message) => {
     console.log("received message:", message.toString());
   });

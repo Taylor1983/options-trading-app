@@ -22,3 +22,5 @@ export type OptionContract = {
   rho: number | null;
   impliedVolatility: number | null;
 };
+
+export * from "./strategies.js";
