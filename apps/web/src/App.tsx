@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 function LoginForm({ onLogin }: { onLogin: (payload: any) => void }) {
   const [email, setEmail] = useState("demo@trader.app");
@@ -35,7 +35,7 @@ function GreekCard({ name, value }: { name: string; value: number }) {
 }
 
 export default function App() {
-  const [token, setToken] = useState<string | null>(null);
+  const [token, setToken] = useState<string | null>(localStorage.getItem("trader_token"));
   const [symbol, setSymbol] = useState("AAPL");
   const [quote, setQuote] = useState<any>(null);
   const [chart, setChart] = useState<any[]>([]);
@@ -47,36 +47,58 @@ export default function App() {
   }, [quote]);
 
   const fetchMarket = async (symbolToUse = symbol) => {
-    const quoteRes = await fetch(`http://localhost:4000/api/quotes/${symbolToUse}`);
-    const quoteData = await quoteRes.json();
-    setQuote(quoteData);
+    try {
+      const quoteRes = await fetch(`http://localhost:4000/api/market/quote/${symbolToUse}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
+      const quoteData = await quoteRes.json();
+      setQuote(quoteData);
 
-    const chartRes = await fetch(`http://localhost:4000/api/market/${symbolToUse}`);
-    const chartData = await chartRes.json();
-    setChart(chartData.candles || []);
+      const chartRes = await fetch(`http://localhost:4000/api/market/candles/${symbolToUse}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
+      const chartData = await chartRes.json();
+      setChart(chartData.candles || []);
 
-    const greekRes = await fetch("http://localhost:4000/api/greeks/calculate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        stockPrice: quoteData.lastPrice,
-        strike: 220,
-        expiryDays: 18,
-        volatility: 28,
-        rate: 0.05,
-        optionType: "CALL",
-      }),
-    });
+      const greekRes = await fetch("http://localhost:4000/api/greeks/calculate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          stockPrice: quoteData.lastPrice,
+          strike: 220,
+          expiryDays: 18,
+          volatility: 28,
+          rate: 0.05,
+          optionType: "CALL",
+        }),
+      });
 
-    const greekData = await greekRes.json();
-    setGreeks(greekData.greeks);
+      const greekData = await greekRes.json();
+      setGreeks(greekData.greeks);
+    } catch (error) {
+      console.error("Failed to load data", error);
+    }
   };
+
+  useEffect(() => {
+    if (token) {
+      fetchMarket();
+    }
+  }, [token]);
 
   const handleLogin = async (payload: any) => {
     if (payload.token) {
+      localStorage.setItem("trader_token", payload.token);
       setToken(payload.token);
-      await fetchMarket();
     }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem("trader_token");
+    setToken(null);
   };
 
   if (!token) {
@@ -90,7 +112,10 @@ export default function App() {
           <span className="symbol-chip">{symbol}</span>
           <input value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} />
         </div>
-        <button className="submit-order" onClick={() => fetchMarket()}>Refresh</button>
+        <div className="toolbar-actions">
+          <button className="secondary-btn" onClick={() => fetchMarket()}>Refresh</button>
+          <button className="secondary-btn danger" onClick={handleLogout}>Logout</button>
+        </div>
       </div>
 
       <div className="market-grid">
@@ -112,7 +137,14 @@ export default function App() {
         <h3>Live Chart</h3>
         <div className="chart-surface">
           {chart.map((point, index) => (
-            <div key={`${point.timestamp}-${index}`} className="candlestick" style={{ height: `${Math.max((point.high - point.low) * 10, 8)}px`, left: `${(index / chart.length) * 100}%` }} />
+            <div
+              key={`${point.timestamp}-${index}`}
+              className="candlestick"
+              style={{
+                height: `${Math.max((point.high - point.low) * 12, 8)}px`,
+                left: `${(index / Math.max(chart.length, 1)) * 100}%`,
+              }}
+            />
           ))}
         </div>
       </div>

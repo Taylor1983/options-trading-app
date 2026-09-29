@@ -7,13 +7,8 @@ html, body, #root {
   color: #edf2ff;
 }
 
-body {
-  min-height: 100vh;
-}
-
-button, input {
-  font: inherit;
-}
+body { min-height: 100vh; }
+button, input { font: inherit; }
 
 .app-shell {
   min-height: 100vh;
@@ -47,6 +42,11 @@ button, input {
   color: white;
   border-radius: 8px;
   padding: 10px 12px;
+}
+
+.toolbar-actions {
+  display: flex;
+  gap: 10px;
 }
 
 .market-grid, .greeks-grid {
@@ -112,7 +112,7 @@ button, input {
   padding: 10px 12px;
 }
 
-.submit-order {
+.submit-order, .secondary-btn {
   border: none;
   border-radius: 8px;
   background: linear-gradient(90deg, #0ea5e9, #22c55e);
@@ -120,6 +120,18 @@ button, input {
   font-weight: 700;
   padding: 10px 14px;
   cursor: pointer;
+}
+
+.secondary-btn {
+  background: rgba(15, 23, 42, 0.7);
+  color: white;
+  border: 1px solid #1f2937;
+}
+
+.secondary-btn.danger {
+  background: rgba(239, 68, 68, 0.1);
+  color: #fca5a5;
+  border-color: rgba(239, 68, 68, 0.4);
 }
 
 .greek-card {
