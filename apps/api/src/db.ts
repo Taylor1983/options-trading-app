@@ -14,3 +14,62 @@ export async function query<T = any>(text: string, params?: any[]) {
   const result = await db.query<T>(text, params ?? []);
   return result.rows;
 }
+
+export async function initializeDatabase() {
+  const schema = `
+    CREATE TABLE IF NOT EXISTS users (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      email VARCHAR(255) UNIQUE NOT NULL,
+      password_hash VARCHAR(255) NOT NULL,
+      first_name VARCHAR(100),
+      last_name VARCHAR(100),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS accounts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      account_type VARCHAR(50) DEFAULT 'paper',
+      buying_power NUMERIC(18,2) DEFAULT 100000,
+      net_liquidation_value NUMERIC(18,2) DEFAULT 100000,
+      cash_balance NUMERIC(18,2) DEFAULT 100000,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS market_quotes (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      symbol VARCHAR(20) NOT NULL,
+      last_price NUMERIC(12,4),
+      bid NUMERIC(12,4),
+      ask NUMERIC(12,4),
+      volume BIGINT,
+      timestamp TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(symbol, timestamp)
+    );
+
+    CREATE TABLE IF NOT EXISTS candles (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      symbol VARCHAR(20) NOT NULL,
+      time_period VARCHAR(10),
+      open_price NUMERIC(12,4),
+      high_price NUMERIC(12,4),
+      low_price NUMERIC(12,4),
+      close_price NUMERIC(12,4),
+      volume BIGINT,
+      timestamp TIMESTAMPTZ,
+      UNIQUE(symbol, time_period, timestamp)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+    CREATE INDEX IF NOT EXISTS idx_accounts_user_id ON accounts(user_id);
+    CREATE INDEX IF NOT EXISTS idx_market_quotes_symbol_ts ON market_quotes(symbol, timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_candles_symbol_ts ON candles(symbol, timestamp DESC);
+  `;
+
+  try {
+    await db.query(schema);
+    console.log("Database initialized");
+  } catch (error) {
+    console.error("Database initialization error:", error);
+  }
+}

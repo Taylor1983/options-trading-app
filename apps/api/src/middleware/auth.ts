@@ -1,7 +1,11 @@
-import { Router } from "express";
+import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 
-export const authMiddleware = (req: any, res: any, next: any) => {
+export interface AuthRequest extends Request {
+  user?: { userId: string; email: string };
+}
+
+export function authMiddleware(req: AuthRequest, res: Response, next: NextFunction) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
 
@@ -10,10 +14,10 @@ export const authMiddleware = (req: any, res: any, next: any) => {
   }
 
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET || "supersecretjwtkey");
+    const payload = jwt.verify(token, process.env.JWT_SECRET || "supersecretjwtkey") as any;
     req.user = payload;
     return next();
   } catch (error) {
     return res.status(401).json({ error: "Invalid auth token" });
   }
-};
+}
