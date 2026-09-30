@@ -1,39 +1,30 @@
 import { useEffect, useMemo, useState } from "react";
 
-const defaultChain = [
-  { strike: 205, callBid: 12.4, callAsk: 12.9, callDelta: 0.61, putBid: 2.2, putAsk: 2.5, putDelta: -0.39, iv: 27.8 },
-  { strike: 210, callBid: 9.8, callAsk: 10.2, callDelta: 0.57, putBid: 3.1, putAsk: 3.4, putDelta: -0.43, iv: 27.4 },
-  { strike: 215, callBid: 7.15, callAsk: 7.5, callDelta: 0.51, putBid: 4.7, putAsk: 5.1, putDelta: -0.49, iv: 26.9 },
-  { strike: 220, callBid: 4.95, callAsk: 5.28, callDelta: 0.46, putBid: 6.9, putAsk: 7.3, putDelta: -0.54, iv: 26.3 },
-  { strike: 225, callBid: 3.12, callAsk: 3.5, callDelta: 0.41, putBid: 9.3, putAsk: 9.8, putDelta: -0.59, iv: 25.9 },
-  { strike: 230, callBid: 1.9, callAsk: 2.18, callDelta: 0.36, putBid: 12.5, putAsk: 12.9, putDelta: -0.64, iv: 25.7 },
-];
+type OptionSide = "CALL" | "PUT";
+type StrategyType = "long-call" | "long-put" | "bull-call-spread" | "iron-condor" | "long-straddle";
 
-function normalizeChain(rows: any[]) {
-  const byStrike = new Map<number, any>();
+type Position = {
+  symbol: string;
+  side: string;
+  quantity: number;
+  averageCost: number;
+  marketPrice: number;
+  pnl: number;
+};
 
-  for (const row of rows) {
-    const strike = Number(row.strike || row.strike_price || 220);
-    const bucket = byStrike.get(strike) || { strike, callBid: 0, callAsk: 0, callDelta: 0, putBid: 0, putAsk: 0, putDelta: 0, iv: 0 };
-    const optionType = String(row.optionType || row.contract_type || row.type || "CALL").toUpperCase();
-
-    if (optionType === "CALL") {
-      bucket.callBid = Number(row.bid ?? row.last_quote?.bid ?? bucket.callBid);
-      bucket.callAsk = Number(row.ask ?? row.last_quote?.ask ?? bucket.callAsk);
-      bucket.callDelta = Number(row.delta ?? bucket.callDelta);
-      bucket.iv = Number(row.iv ?? row.implied_volatility ?? bucket.iv);
-    } else {
-      bucket.putBid = Number(row.bid ?? row.last_quote?.bid ?? bucket.putBid);
-      bucket.putAsk = Number(row.ask ?? row.last_quote?.ask ?? bucket.putAsk);
-      bucket.putDelta = Number(row.delta ?? bucket.putDelta);
-      bucket.iv = Number(row.iv ?? row.implied_volatility ?? bucket.iv);
-    }
-
-    byStrike.set(strike, bucket);
-  }
-
-  return Array.from(byStrike.values()).sort((a, b) => a.strike - b.strike);
-}
+type PortfolioState = {
+  accountValue: number;
+  buyingPower: number;
+  pnl: number;
+  positions: Position[];
+  account: {
+    id: string | null;
+    type: string;
+    cash: number;
+    buyingPower: number;
+    netLiquidationValue: number;
+  } | null;
+};
 
 function LoginForm({ onLogin }: { onLogin: (payload: any) => void }) {
   const [email, setEmail] = useState("demo@trader.app");
@@ -49,9 +40,14 @@ function LoginForm({ onLogin }: { onLogin: (payload: any) => void }) {
         body: JSON.stringify({ email, password }),
       });
       const data = await res.json();
+      if (!res.ok) {
+        alert(data.error || "Login failed");
+        return;
+      }
       onLogin(data);
     } catch (error) {
       console.error("Login error", error);
+      alert("Unable to log in. Make sure the API is running.");
     } finally {
       setLoading(false);
     }
@@ -73,74 +69,143 @@ function GreekCard({ name, value }: { name: string; value: number }) {
   return (
     <div className="greek-card">
       <span>{name}</span>
-      <strong>{value.toFixed(2)}</strong>
+      <strong>{value}</strong>
     </div>
   );
 }
 
-type OptionSide = "CALL" | "PUT";
-type StrategyType = "long-call" | "long-put" | "bull-call-spread" | "iron-condor" | "long-straddle";
+type OptionRow = {
+  strike: number;
+  callBid: number;
+  callAsk: number;
+  callDelta: number;
+  putBid: number;
+  putAsk: number;
+  putDelta: number;
+  iv: number;
+};
 
-function OptionChainPanel({ optionChain, onSelectStrike }: { optionChain: any[]; onSelectStrike: (strike: number, side: OptionSide, price: number) => void; }) {
+const defaultOptionChainData: OptionRow[] = [
+  { strike: 200, callBid: 15.2, callAsk: 15.85, callDelta: 0.64, putBid: 1.6, putAsk: 1.95, putDelta: -0.36, iv: 28.1 },
+  { strike: 205, callBid: 12.4, callAsk: 12.9, callDelta: 0.61, putBid: 2.2, putAsk: 2.5, putDelta: -0.39, iv: 27.8 },
+  { strike: 210, callBid: 9.8, callAsk: 10.2, callDelta: 0.57, putBid: 3.1, putAsk: 3.4, putDelta: -0.43, iv: 27.4 },
+  { strike: 215, callBid: 7.15, callAsk: 7.5, callDelta: 0.51, putBid: 4.7, putAsk: 5.1, putDelta: -0.49, iv: 26.9 },
+  { strike: 220, callBid: 4.95, callAsk: 5.28, callDelta: 0.46, putBid: 6.9, putAsk: 7.3, putDelta: -0.54, iv: 26.3 },
+  { strike: 225, callBid: 3.12, callAsk: 3.5, callDelta: 0.41, putBid: 9.3, putAsk: 9.8, putDelta: -0.59, iv: 25.9 },
+  { strike: 230, callBid: 1.9, callAsk: 2.18, callDelta: 0.36, putBid: 12.5, putAsk: 12.9, putDelta: -0.64, iv: 25.7 },
+];
+
+function OptionChainPanel({
+  optionChain,
+  onSelectStrike,
+}: {
+  optionChain: any[];
+  onSelectStrike: (strike: number, side: OptionSide, price: number) => void;
+}) {
   const [selectedTab, setSelectedTab] = useState<"calls" | "puts" | "both">("both");
-  const rows = optionChain.length ? normalizeChain(optionChain) : defaultChain;
+
+  const rows = optionChain.length ? optionChain : defaultOptionChainData;
 
   return (
     <section className="panel">
       <div className="panel-header">
         <h3>Option Chain - AAPL Oct 17</h3>
         <div className="pill-group">
-          <button className={`pill ${selectedTab === "calls" ? "active" : ""}`} onClick={() => setSelectedTab("calls")}>Calls</button>
-          <button className={`pill ${selectedTab === "puts" ? "active" : ""}`} onClick={() => setSelectedTab("puts")}>Puts</button>
-          <button className={`pill ${selectedTab === "both" ? "active" : ""}`} onClick={() => setSelectedTab("both")}>Both</button>
+          <button className={`pill ${selectedTab === "calls" ? "active" : ""}`} onClick={() => setSelectedTab("calls")}>
+            Calls
+          </button>
+          <button className={`pill ${selectedTab === "puts" ? "active" : ""}`} onClick={() => setSelectedTab("puts")}>
+            Puts
+          </button>
+          <button className={`pill ${selectedTab === "both" ? "active" : ""}`} onClick={() => setSelectedTab("both")}>
+            Both
+          </button>
         </div>
       </div>
 
       <div className="option-table">
         <div className="option-header">
           <span>Strike</span>
-          {(selectedTab === "calls" || selectedTab === "both") && <><span>Call Bid</span><span>Call Ask</span><span>Delta</span></>}
-          {(selectedTab === "puts" || selectedTab === "both") && <><span>Put Bid</span><span>Put Ask</span><span>Delta</span></>}
+          {(selectedTab === "calls" || selectedTab === "both") && (
+            <>
+              <span>Call Bid</span>
+              <span>Call Ask</span>
+              <span>Delta</span>
+            </>
+          )}
+          {(selectedTab === "puts" || selectedTab === "both") && (
+            <>
+              <span>Put Bid</span>
+              <span>Put Ask</span>
+              <span>Delta</span>
+            </>
+          )}
           <span>IV</span>
         </div>
 
-        {rows.map((row) => (
-          <div key={row.strike} className="option-row">
-            <span className="strike-cell">{row.strike}</span>
+        {rows.map((row, index) => {
+          const strike = Number(row.strike ?? 0);
+          const callBid = Number(row.callBid ?? row.bid ?? 0);
+          const callAsk = Number(row.callAsk ?? row.ask ?? 0);
+          const putBid = Number(row.putBid ?? row.bid ?? 0);
+          const putAsk = Number(row.putAsk ?? row.ask ?? 0);
+          const callDelta = Number(row.callDelta ?? row.delta ?? 0);
+          const putDelta = Number(row.putDelta ?? row.delta ?? 0);
+          const iv = Number(row.iv ?? 0);
 
-            {(selectedTab === "calls" || selectedTab === "both") && (
-              <>
-                <button className="price-btn positive" onClick={() => onSelectStrike(row.strike, "CALL", row.callBid)}>{row.callBid}</button>
-                <button className="price-btn" onClick={() => onSelectStrike(row.strike, "CALL", row.callAsk)}>{row.callAsk}</button>
-                <span>{Number(row.callDelta || 0).toFixed(2)}</span>
-              </>
-            )}
-
-            {(selectedTab === "puts" || selectedTab === "both") && (
-              <>
-                <button className="price-btn positive" onClick={() => onSelectStrike(row.strike, "PUT", row.putBid)}>{row.putBid}</button>
-                <button className="price-btn" onClick={() => onSelectStrike(row.strike, "PUT", row.putAsk)}>{row.putAsk}</button>
-                <span>{Number(row.putDelta || 0).toFixed(2)}</span>
-              </>
-            )}
-
-            <span>{Number(row.iv || 0).toFixed(1)}%</span>
-          </div>
-        ))}
+          return (
+            <div key={`${strike}-${index}`} className="option-row">
+              <span className="strike-cell">{strike}</span>
+              {(selectedTab === "calls" || selectedTab === "both") && (
+                <>
+                  <button className="price-btn positive" onClick={() => onSelectStrike(strike, "CALL", callBid)} title="Buy at bid">
+                    {callBid.toFixed(2)}
+                  </button>
+                  <button className="price-btn" onClick={() => onSelectStrike(strike, "CALL", callAsk)} title="Sell at ask">
+                    {callAsk.toFixed(2)}
+                  </button>
+                  <span>{callDelta.toFixed(2)}</span>
+                </>
+              )}
+              {(selectedTab === "puts" || selectedTab === "both") && (
+                <>
+                  <button className="price-btn positive" onClick={() => onSelectStrike(strike, "PUT", putBid)} title="Buy at bid">
+                    {putBid.toFixed(2)}
+                  </button>
+                  <button className="price-btn" onClick={() => onSelectStrike(strike, "PUT", putAsk)} title="Sell at ask">
+                    {putAsk.toFixed(2)}
+                  </button>
+                  <span>{putDelta.toFixed(2)}</span>
+                </>
+              )}
+              <span>{iv.toFixed(1)}%</span>
+            </div>
+          );
+        })}
       </div>
     </section>
   );
 }
 
 const strategies: { id: StrategyType; name: string; description: string }[] = [
-  { id: "long-call", name: "Long Call", description: "Bullish: buy a call and profit if the stock rises." },
-  { id: "long-put", name: "Long Put", description: "Bearish: buy a put and profit if the stock falls." },
-  { id: "bull-call-spread", name: "Bull Call Spread", description: "Moderate bullish with capped risk and reward." },
-  { id: "iron-condor", name: "Iron Condor", description: "Neutral strategy using short call and put spreads." },
-  { id: "long-straddle", name: "Long Straddle", description: "Volatility play: buy both call and put at the same strike." },
+  { id: "long-call", name: "Long Call", description: "Bullish: Buy call, profit if stock rises" },
+  { id: "long-put", name: "Long Put", description: "Bearish: Buy put, profit if stock falls" },
+  { id: "bull-call-spread", name: "Bull Call Spread", description: "Moderate bullish, limited risk & reward" },
+  { id: "iron-condor", name: "Iron Condor", description: "Neutral: Sell spreads on both sides" },
+  { id: "long-straddle", name: "Long Straddle", description: "Volatile: Buy call + put at same strike" },
 ];
 
-function StrategyBuilderPanel({ selectedStrike, selectedSide, selectedPrice, onStrategySelect }: { selectedStrike: number | null; selectedSide: OptionSide | null; selectedPrice: number | null; onStrategySelect: (strategy: StrategyType) => void; }) {
+function StrategyBuilderPanel({
+  selectedStrike,
+  selectedType,
+  selectedPrice,
+  onStrategySelect,
+}: {
+  selectedStrike: number | null;
+  selectedType: OptionSide | null;
+  selectedPrice: number | null;
+  onStrategySelect: (strategy: StrategyType) => void;
+}) {
   const [selectedStrategy, setSelectedStrategy] = useState<StrategyType>("long-call");
 
   const handleStrategyClick = (strategy: StrategyType) => {
@@ -163,11 +228,13 @@ function StrategyBuilderPanel({ selectedStrike, selectedSide, selectedPrice, onS
         ))}
       </div>
 
-      {selectedStrike && selectedSide && selectedPrice && (
+      {selectedStrike && selectedType && selectedPrice && (
         <div className="selected-leg">
           <h4>Selected Leg</h4>
           <div className="leg-info">
-            <span>{selectedSide} {selectedStrike}</span>
+            <span>
+              {selectedType} {selectedStrike}
+            </span>
             <strong>${selectedPrice}</strong>
           </div>
         </div>
@@ -176,10 +243,28 @@ function StrategyBuilderPanel({ selectedStrike, selectedSide, selectedPrice, onS
   );
 }
 
-function OrderTicketPanel({ selectedStrike, selectedSide, selectedPrice, selectedStrategy }: { selectedStrike: number | null; selectedSide: OptionSide | null; selectedPrice: number | null; selectedStrategy: StrategyType | null; }) {
+function OrderTicketPanel({
+  selectedStrike,
+  selectedType,
+  selectedPrice,
+  selectedStrategy,
+  buyingPower,
+  onOrderPlaced,
+}: {
+  selectedStrike: number | null;
+  selectedType: OptionSide | null;
+  selectedPrice: number | null;
+  selectedStrategy: StrategyType | null;
+  buyingPower: number;
+  onOrderPlaced: () => void;
+}) {
   const [quantity, setQuantity] = useState(1);
   const [orderType, setOrderType] = useState<"market" | "limit">("limit");
   const [limitPrice, setLimitPrice] = useState(selectedPrice?.toString() || "");
+
+  useEffect(() => {
+    setLimitPrice(selectedPrice?.toString() || "");
+  }, [selectedPrice]);
 
   const totalRisk = useMemo(() => {
     if (!selectedPrice || !quantity) return 0;
@@ -187,12 +272,12 @@ function OrderTicketPanel({ selectedStrike, selectedSide, selectedPrice, selecte
   }, [selectedPrice, quantity]);
 
   const handlePlaceOrder = async () => {
-    if (!selectedStrike || !selectedSide || !selectedPrice) {
-      alert("Select a strike first.");
+    const token = localStorage.getItem("trader_token");
+    if (!selectedStrike || !selectedType || !selectedPrice || !token) {
+      alert("Select an option and log in first.");
       return;
     }
 
-    const token = localStorage.getItem("trader_token");
     const payload = {
       symbol: "AAPL",
       side: "BUY",
@@ -207,32 +292,44 @@ function OrderTicketPanel({ selectedStrike, selectedSide, selectedPrice, selecte
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify(payload),
       });
 
       const data = await res.json();
-      alert(`Order ${data.status || "filled"}: ${selectedSide} AAPL ${selectedStrike} x ${quantity}`);
+      if (!res.ok) {
+        alert(data.error || "Order failed");
+        return;
+      }
+
+      alert(`Order ${data.status}: ${selectedType} AAPL ${selectedStrike}`);
+      onOrderPlaced();
     } catch (error) {
+      console.error("Order failed", error);
       alert("Order failed");
     }
   };
 
   return (
     <section className="panel">
-      <div className="panel-header"><h3>Order Ticket</h3></div>
+      <div className="panel-header">
+        <h3>Order Ticket</h3>
+      </div>
+
       <div className="order-form">
-        {selectedStrike && selectedSide && selectedPrice ? (
+        {selectedStrike && selectedType ? (
           <>
             <div className="symbol-display">
-              <strong>{selectedSide} AAPL {selectedStrike}</strong>
+              <strong>
+                {selectedType} AAPL {selectedStrike}
+              </strong>
               <span>${selectedPrice}</span>
             </div>
 
             <label>
               Quantity
-              <input type="number" value={quantity} onChange={(e) => setQuantity(Number(e.target.value) || 1)} min={1} />
+              <input type="number" value={quantity} onChange={(e) => setQuantity(Number(e.target.value))} min="1" />
             </label>
 
             <label>
@@ -257,92 +354,17 @@ function OrderTicketPanel({ selectedStrike, selectedSide, selectedPrice, selecte
               </div>
               <div className="risk-row">
                 <span>Buying Power</span>
-                <strong>$245,800</strong>
+                <strong>${buyingPower.toLocaleString()}</strong>
               </div>
             </div>
 
-            <button className="submit-order" onClick={handlePlaceOrder}>Place Paper Trade</button>
+            <button className="submit-order" onClick={handlePlaceOrder}>
+              Place Paper Trade
+            </button>
           </>
         ) : (
-          <p className="placeholder">Select an option from the chain to begin.</p>
+          <p className="placeholder">Select an option from the chain to begin</p>
         )}
-      </div>
-    </section>
-  );
-}
-
-function PortfolioPanel({ portfolio, orders }: { portfolio: any; orders: any[] }) {
-  return (
-    <section className="panel portfolio-panel">
-      <div className="panel-header">
-        <h3>Portfolio</h3>
-      </div>
-
-      <div className="portfolio-summary-grid">
-        <div className="stat-box">
-          <span>Cash</span>
-          <strong>${portfolio?.account?.cash ?? 0}</strong>
-        </div>
-        <div className="stat-box">
-          <span>Buying Power</span>
-          <strong>${portfolio?.account?.buyingPower ?? 0}</strong>
-        </div>
-        <div className="stat-box">
-          <span>Net Liquidation</span>
-          <strong>${portfolio?.account?.netLiquidationValue ?? 0}</strong>
-        </div>
-      </div>
-
-      <div className="portfolio-sections">
-        <div className="portfolio-table-wrap">
-          <h4>Holdings</h4>
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Symbol</th>
-                <th>Qty</th>
-                <th>Avg Cost</th>
-                <th>Market</th>
-                <th>P&L</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(portfolio?.positions || []).map((position: any) => (
-                <tr key={position.symbol}>
-                  <td>{position.symbol}</td>
-                  <td>{position.quantity}</td>
-                  <td>${Number(position.averageCost || 0).toFixed(2)}</td>
-                  <td>${Number(position.marketPrice || 0).toFixed(2)}</td>
-                  <td className={Number(position.pnl || 0) >= 0 ? "positive" : "negative"}>${Number(position.pnl || 0).toFixed(2)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        <div className="portfolio-table-wrap">
-          <h4>Recent Orders</h4>
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Symbol</th>
-                <th>Side</th>
-                <th>Qty</th>
-                <th>Price</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(orders || []).slice(0, 6).map((order: any) => (
-                <tr key={`${order.symbol}-${order.created_at}-${order.side}`}>
-                  <td>{order.symbol}</td>
-                  <td>{order.side}</td>
-                  <td>{order.quantity}</td>
-                  <td>${Number(order.limit_price || 0).toFixed(2)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
       </div>
     </section>
   );
@@ -355,18 +377,53 @@ export default function App() {
   const [chart, setChart] = useState<any[]>([]);
   const [greeks, setGreeks] = useState<any>(null);
   const [optionChain, setOptionChain] = useState<any[]>([]);
-  const [portfolio, setPortfolio] = useState<any>(null);
-  const [orders, setOrders] = useState<any[]>([]);
   const [selectedStrike, setSelectedStrike] = useState<number | null>(null);
-  const [selectedSide, setSelectedSide] = useState<OptionSide | null>(null);
+  const [selectedType, setSelectedType] = useState<OptionSide | null>(null);
   const [selectedPrice, setSelectedPrice] = useState<number | null>(null);
-  const [selectedStrategy, setSelectedStrategy] = useState<StrategyType | null>("long-call");
-  const [wsStatus, setWsStatus] = useState("connecting");
+  const [selectedStrategy, setSelectedStrategy] = useState<StrategyType | null>(null);
+  const [portfolio, setPortfolio] = useState<PortfolioState>({
+    accountValue: 0,
+    buyingPower: 0,
+    pnl: 0,
+    positions: [],
+    account: null,
+  });
+  const [orderHistory, setOrderHistory] = useState<any[]>([]);
 
   const marketSummary = useMemo(() => {
     if (!quote) return { last: 220.12, bid: 219.98, ask: 220.26 };
     return { last: quote.lastPrice, bid: quote.bid, ask: quote.ask };
   }, [quote]);
+
+  const fetchPortfolio = async () => {
+    if (!token) return;
+
+    try {
+      const portfolioRes = await fetch("http://localhost:4000/api/portfolio", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const portfolioData = await portfolioRes.json();
+      if (portfolioRes.ok) {
+        setPortfolio({
+          accountValue: Number(portfolioData.accountValue ?? 0),
+          buyingPower: Number(portfolioData.buyingPower ?? 0),
+          pnl: Number(portfolioData.pnl ?? 0),
+          positions: portfolioData.positions ?? [],
+          account: portfolioData.account ?? null,
+        });
+      }
+
+      const ordersRes = await fetch("http://localhost:4000/api/orders/history", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const ordersData = await ordersRes.json();
+      if (ordersRes.ok) {
+        setOrderHistory(ordersData.orders ?? []);
+      }
+    } catch (error) {
+      console.error("Failed to load portfolio", error);
+    }
+  };
 
   const fetchMarket = async (symbolToUse = symbol) => {
     try {
@@ -381,6 +438,12 @@ export default function App() {
       });
       const chartData = await chartRes.json();
       setChart(chartData.candles || []);
+
+      const optionRes = await fetch(`http://localhost:4000/api/options/chain/${symbolToUse}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
+      const optionData = await optionRes.json();
+      setOptionChain(optionData.chain || defaultOptionChainData);
 
       const greekRes = await fetch("http://localhost:4000/api/greeks/calculate", {
         method: "POST",
@@ -397,6 +460,7 @@ export default function App() {
           optionType: "CALL",
         }),
       });
+
       const greekData = await greekRes.json();
       setGreeks(greekData.greeks);
     } catch (error) {
@@ -404,76 +468,14 @@ export default function App() {
     }
   };
 
-  const fetchOptionChain = async (symbolToUse = symbol) => {
-    try {
-      const res = await fetch(`http://localhost:4000/api/options/chain/${symbolToUse}`);
-      const data = await res.json();
-      setOptionChain(data.chain || []);
-    } catch (error) {
-      console.error("Failed to load option chain", error);
-    }
-  };
-
-  const fetchPortfolio = async () => {
-    if (!token) return;
-
-    try {
-      const res = await fetch("http://localhost:4000/api/portfolio/", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-      setPortfolio(data);
-    } catch (error) {
-      console.error("Failed to load portfolio", error);
-    }
-  };
-
-  const fetchOrderHistory = async () => {
-    if (!token) return;
-
-    try {
-      const res = await fetch("http://localhost:4000/api/orders/history", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-      setOrders(data.orders || []);
-    } catch (error) {
-      console.error("Failed to load orders", error);
-    }
-  };
-
   useEffect(() => {
     if (token) {
-      fetchMarket();
-      fetchOptionChain();
       fetchPortfolio();
-      fetchOrderHistory();
+      fetchMarket();
     }
-  }, [token, symbol]);
+  }, [token]);
 
-  useEffect(() => {
-    if (!token) return;
-
-    const socket = new WebSocket("ws://localhost:4000/ws");
-
-    socket.onopen = () => setWsStatus("live");
-    socket.onclose = () => setWsStatus("offline");
-
-    socket.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-
-      if (msg.type === "market-snapshot") {
-        const target = msg.data.find((item: any) => item.symbol === symbol.toUpperCase());
-        if (target) {
-          setQuote({ symbol: target.symbol, lastPrice: target.lastPrice, bid: target.bid, ask: target.ask, volume: target.volume, timestamp: target.timestamp });
-        }
-      }
-    };
-
-    return () => socket.close();
-  }, [token, symbol]);
-
-  const handleLogin = (payload: any) => {
+  const handleLogin = async (payload: any) => {
     if (payload.token) {
       localStorage.setItem("trader_token", payload.token);
       setToken(payload.token);
@@ -483,11 +485,18 @@ export default function App() {
   const handleLogout = () => {
     localStorage.removeItem("trader_token");
     setToken(null);
+    setPortfolio({
+      accountValue: 0,
+      buyingPower: 0,
+      pnl: 0,
+      positions: [],
+      account: null,
+    });
   };
 
-  const handleSelectStrike = (strike: number, side: OptionSide, price: number) => {
+  const handleSelectStrike = (strike: number, type: OptionSide, price: number) => {
     setSelectedStrike(strike);
-    setSelectedSide(side);
+    setSelectedType(type);
     setSelectedPrice(price);
   };
 
@@ -502,25 +511,55 @@ export default function App() {
           <span className="symbol-chip">{symbol}</span>
           <input value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} />
         </div>
-
         <div className="toolbar-actions">
-          <span className={`ws-status ${wsStatus}`}>{wsStatus.toUpperCase()}</span>
-          <button className="secondary-btn" onClick={() => fetchMarket()}>Refresh</button>
-          <button className="secondary-btn danger" onClick={handleLogout}>Logout</button>
+          <button className="secondary-btn" onClick={() => fetchMarket()}>
+            Refresh
+          </button>
+          <button className="secondary-btn danger" onClick={handleLogout}>
+            Logout
+          </button>
         </div>
       </div>
 
       <div className="market-grid">
-        <div className="stat-box"><span>Last</span><strong>${marketSummary.last}</strong></div>
-        <div className="stat-box"><span>Bid</span><strong>${marketSummary.bid}</strong></div>
-        <div className="stat-box"><span>Ask</span><strong>${marketSummary.ask}</strong></div>
+        <div className="stat-box">
+          <span>Last</span>
+          <strong>${marketSummary.last}</strong>
+        </div>
+        <div className="stat-box">
+          <span>Bid</span>
+          <strong>${marketSummary.bid}</strong>
+        </div>
+        <div className="stat-box">
+          <span>Ask</span>
+          <strong>${marketSummary.ask}</strong>
+        </div>
+        <div className="stat-box">
+          <span>Buying Power</span>
+          <strong>${portfolio.buyingPower.toLocaleString()}</strong>
+        </div>
+        <div className="stat-box">
+          <span>Account Value</span>
+          <strong>${portfolio.accountValue.toLocaleString()}</strong>
+        </div>
+        <div className="stat-box">
+          <span>P&L</span>
+          <strong className={portfolio.pnl >= 0 ? "positive" : "negative"}>${portfolio.pnl.toLocaleString()}</strong>
+        </div>
       </div>
 
       <div className="chart-panel">
         <h3>Live Chart</h3>
         <div className="chart-surface">
           {chart.map((point, index) => (
-            <div key={`${point.timestamp}-${index}`} className="candlestick" style={{ height: `${Math.max((point.high - point.low) * 12, 8)}px`, left: `${(index / Math.max(chart.length, 1)) * 100}%` }} />
+            <div
+              key={`${point.timestamp}-${index}`}
+              className="candlestick"
+              style={{
+                height: `${Math.max((point.high - point.low) * 12, 8)}px`,
+                left: `${(index / Math.max(chart.length, 1)) * 100}%`,
+              }}
+            />
           ))}
         </div>
       </div>
@@ -536,14 +575,81 @@ export default function App() {
         </div>
       )}
 
-      <PortfolioPanel portfolio={portfolio} orders={orders} />
-
       <div className="trading-grid">
         <OptionChainPanel optionChain={optionChain} onSelectStrike={handleSelectStrike} />
-
         <div className="right-column">
-          <StrategyBuilderPanel selectedStrike={selectedStrike} selectedSide={selectedSide} selectedPrice={selectedPrice} onStrategySelect={setSelectedStrategy} />
-          <OrderTicketPanel selectedStrike={selectedStrike} selectedSide={selectedSide} selectedPrice={selectedPrice} selectedStrategy={selectedStrategy} />
+          <StrategyBuilderPanel
+            selectedStrike={selectedStrike}
+            selectedType={selectedType}
+            selectedPrice={selectedPrice}
+            onStrategySelect={setSelectedStrategy}
+          />
+          <OrderTicketPanel
+            selectedStrike={selectedStrike}
+            selectedType={selectedType}
+            selectedPrice={selectedPrice}
+            selectedStrategy={selectedStrategy}
+            buyingPower={portfolio.buyingPower}
+            onOrderPlaced={fetchPortfolio}
+          />
+        </div>
+      </div>
+
+      <div className="panel" style={{ marginTop: 20 }}>
+        <div className="panel-header">
+          <h3>Portfolio Positions</h3>
+        </div>
+        <div className="portfolio-list">
+          {portfolio.positions.length ? (
+            portfolio.positions.map((position) => (
+              <div key={position.symbol} className="portfolio-item">
+                <div>
+                  <strong>{position.symbol}</strong>
+                  <span>{position.side}</span>
+                </div>
+                <div>
+                  <span>Qty: {position.quantity}</span>
+                </div>
+                <div>
+                  <span>Avg Cost: ${position.averageCost.toFixed(2)}</span>
+                </div>
+                <div>
+                  <span>P&L: ${position.pnl.toFixed(2)}</span>
+                </div>
+              </div>
+            ))
+          ) : (
+            <p className="placeholder">No positions yet. Place your first paper trade.</p>
+          )}
+        </div>
+      </div>
+
+      <div className="panel" style={{ marginTop: 20 }}>
+        <div className="panel-header">
+          <h3>Recent Orders</h3>
+        </div>
+        <div className="portfolio-list">
+          {orderHistory.length ? (
+            orderHistory.map((order, idx) => (
+              <div key={`${order.symbol}-${idx}`} className="portfolio-item">
+                <div>
+                  <strong>{order.symbol}</strong>
+                  <span>{order.side}</span>
+                </div>
+                <div>
+                  <span>Qty: {order.quantity}</span>
+                </div>
+                <div>
+                  <span>{order.orderType}</span>
+                </div>
+                <div>
+                  <span>${Number(order.limitPrice || 0).toFixed(2)}</span>
+                </div>
+              </div>
+            ))
+          ) : (
+            <p className="placeholder">No orders yet.</p>
+          )}
         </div>
       </div>
     </div>
