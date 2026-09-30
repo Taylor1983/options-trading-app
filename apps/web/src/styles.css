@@ -79,7 +79,7 @@ button, input, select { font: inherit; }
 
 .market-grid,
 .greeks-grid,
-.portfolio-summary {
+.portfolio-summary-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
@@ -357,6 +357,10 @@ button, input, select { font: inherit; }
   color: #f87171;
 }
 
+.positive {
+  color: #4ade80;
+}
+
 .placeholder {
   color: #94a3b8;
   text-align: center;
@@ -376,10 +380,40 @@ button, input, select { font: inherit; }
   gap: 16px;
 }
 
+.portfolio-panel {
+  margin-bottom: 20px;
+}
+
+.portfolio-sections {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.data-table th, .data-table td {
+  padding: 10px 8px;
+  border-bottom: 1px solid #1f2937;
+  text-align: left;
+  font-size: 0.82rem;
+}
+
+.data-table th {
+  color: #94a3b8;
+  font-weight: 600;
+}
+
 @media (max-width: 1200px) {
-  .trading-grid {
+  .trading-grid,
+  .portfolio-sections {
     grid-template-columns: 1fr;
   }
+
   .option-header, .option-row {
     grid-template-columns: 50px repeat(5, minmax(50px, 1fr));
   }
