@@ -10,60 +10,96 @@ portfolioRouter.get("/", async (req: any, res) => {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const orderRows = await query(
-    `SELECT symbol, side, quantity, limit_price, created_at
-     FROM orders WHERE user_id = $1 ORDER BY created_at DESC`,
-    [userId]
-  );
+  try {
+    const accountRows = await query(
+      `SELECT id, buying_power, net_liquidation_value, cash_balance FROM accounts WHERE user_id = $1`,
+      [userId]
+    );
 
-  const positionsMap = new Map<string, { symbol: string; quantity: number; averageCost: number; side: string; pnl: number; }>();
-
-  for (const row of orderRows) {
-    const symbol = row.symbol;
-    const current = positionsMap.get(symbol) || { symbol, quantity: 0, averageCost: 0, side: "LONG", pnl: 0 };
-    const qty = Number(row.quantity);
-    const price = Number(row.limit_price || 0);
-
-    if (row.side === "BUY") {
-      current.quantity += qty;
-      current.averageCost = current.quantity ? ((current.averageCost * (current.quantity - qty)) + (price * qty)) / current.quantity : price;
-      current.side = current.quantity >= 0 ? "LONG" : "SHORT";
-    } else {
-      current.quantity -= qty;
-      current.side = current.quantity >= 0 ? "LONG" : "SHORT";
+    if (!accountRows.length) {
+      return res.status(404).json({ error: "Account not found" });
     }
 
-    positionsMap.set(symbol, current);
-  }
+    const account = accountRows[0];
 
-  const quoteRows = await query(
-    `SELECT symbol, last_price FROM market_quotes WHERE symbol IN (${orderRows.map(() => "$" + (orderRows.indexOf((_: any) => _) + 1)).join(",") || "''"}) ORDER BY timestamp DESC`,
-    orderRows.map((row) => row.symbol)
-  );
+    const positionRows = await query(
+      `SELECT symbol, quantity, average_cost, side FROM positions WHERE user_id = $1 AND quantity != 0`,
+      [userId]
+    );
 
-  const positions = Array.from(positionsMap.values())
-    .filter((position) => position.quantity !== 0)
-    .map((position) => {
-      const lastQuote = quoteRows.find((row) => row.symbol === position.symbol);
-      const marketPrice = Number(lastQuote?.last_price || position.averageCost || 0);
-      const pnl = (marketPrice - position.averageCost) * position.quantity * 100;
+    const quoteSymbols = positionRows.map((pos) => pos.symbol);
+    let marketPrices: Record<string, number> = {};
+
+    if (quoteSymbols.length > 0) {
+      const placeholders = quoteSymbols.map((_, i) => `$${i + 1}`).join(",");
+      const quoteRows = await query(
+        `SELECT DISTINCT ON (symbol) symbol, last_price FROM market_quotes WHERE symbol IN (${placeholders}) ORDER BY symbol, timestamp DESC`,
+        quoteSymbols
+      );
+
+      quoteRows.forEach((row: any) => {
+        marketPrices[row.symbol] = Number(row.last_price || row.average_cost);
+      });
+    }
+
+    const positions = positionRows.map((position: any) => {
+      const marketPrice = marketPrices[position.symbol] || Number(position.average_cost);
+      const pnl = (marketPrice - Number(position.average_cost)) * Number(position.quantity) * 100;
+      const totalValue = marketPrice * Number(position.quantity) * 100;
+
       return {
         symbol: position.symbol,
         quantity: position.quantity,
         side: position.side,
-        price: position.averageCost,
+        averageCost: Number(position.average_cost),
+        marketPrice,
         pnl,
+        totalValue,
       };
     });
 
-  const accountValue = 1284920;
-  const buyingPower = 245800;
-  const pnl = positions.reduce((sum, position) => sum + position.pnl, 0);
+    const totalPnL = positions.reduce((sum, pos) => sum + pos.pnl, 0);
+    const totalPositionValue = positions.reduce((sum, pos) => sum + pos.totalValue, 0);
+    const nlv = Number(account.cash_balance) + totalPositionValue;
 
-  return res.json({
-    accountValue,
-    buyingPower,
-    pnl,
-    positions,
-  });
+    return res.json({
+      account: {
+        cash: Number(account.cash_balance),
+        buyingPower: Number(account.buying_power),
+        netLiquidationValue: nlv,
+      },
+      positions,
+      summary: {
+        totalPnL,
+        totalPositionValue,
+      },
+    });
+  } catch (error) {
+    console.error("Portfolio error:", error);
+    return res.status(500).json({ error: "Failed to fetch portfolio" });
+  }
+});
+
+portfolioRouter.get("/account", async (req: any, res) => {
+  const userId = req.user?.userId;
+
+  if (!userId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  try {
+    const rows = await query(
+      `SELECT id, account_type, buying_power, net_liquidation_value, cash_balance, created_at FROM accounts WHERE user_id = $1`,
+      [userId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ error: "Account not found" });
+    }
+
+    return res.json({ account: rows[0] });
+  } catch (error) {
+    console.error("Account error:", error);
+    return res.status(500).json({ error: "Failed to fetch account" });
+  }
 });
