@@ -1,105 +1,120 @@
 import { Router } from "express";
+import jwt from "jsonwebtoken";
+import bcrypt from "bcrypt";
 import { query } from "../db.js";
 
-export const portfolioRouter = Router();
+export const authRouter = Router();
 
-portfolioRouter.get("/", async (req: any, res) => {
-  const userId = req.user?.userId;
+function signToken(user: { id: string; email: string }) {
+  return jwt.sign(
+    { userId: user.id, email: user.email },
+    process.env.JWT_SECRET || "supersecretjwtkey",
+    { expiresIn: "7d" }
+  );
+}
 
-  if (!userId) {
-    return res.status(401).json({ error: "Unauthorized" });
+authRouter.post("/register", async (req, res) => {
+  const { email, password, firstName, lastName } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ error: "Email and password are required" });
   }
 
   try {
+    const existingUser = await query(`SELECT id FROM users WHERE email = $1`, [email]);
+
+    if (existingUser.length > 0) {
+      return res.status(409).json({ error: "Email already registered" });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    const rows = await query(
+      `INSERT INTO users (email, password_hash, first_name, last_name)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, email, first_name, last_name`,
+      [email, passwordHash, firstName || "", lastName || ""]
+    );
+
+    const user = rows[0];
+
     const accountRows = await query(
-      `SELECT id, buying_power, net_liquidation_value, cash_balance FROM accounts WHERE user_id = $1`,
-      [userId]
+      `INSERT INTO accounts (user_id, account_type, buying_power, net_liquidation_value, cash_balance)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
+      [user.id, "paper", 100000, 100000, 100000]
     );
 
-    if (!accountRows.length) {
-      return res.status(404).json({ error: "Account not found" });
-    }
-
-    const account = accountRows[0];
-
-    const positionRows = await query(
-      `SELECT symbol, quantity, average_cost, side FROM positions WHERE user_id = $1 AND quantity != 0`,
-      [userId]
-    );
-
-    const quoteSymbols = positionRows.map((pos) => pos.symbol);
-    let marketPrices: Record<string, number> = {};
-
-    if (quoteSymbols.length > 0) {
-      const placeholders = quoteSymbols.map((_, i) => `$${i + 1}`).join(",");
-      const quoteRows = await query(
-        `SELECT DISTINCT ON (symbol) symbol, last_price FROM market_quotes WHERE symbol IN (${placeholders}) ORDER BY symbol, timestamp DESC`,
-        quoteSymbols
-      );
-
-      quoteRows.forEach((row: any) => {
-        marketPrices[row.symbol] = Number(row.last_price || row.average_cost);
-      });
-    }
-
-    const positions = positionRows.map((position: any) => {
-      const marketPrice = marketPrices[position.symbol] || Number(position.average_cost);
-      const pnl = (marketPrice - Number(position.average_cost)) * Number(position.quantity) * 100;
-      const totalValue = marketPrice * Number(position.quantity) * 100;
-
-      return {
-        symbol: position.symbol,
-        quantity: position.quantity,
-        side: position.side,
-        averageCost: Number(position.average_cost),
-        marketPrice,
-        pnl,
-        totalValue,
-      };
-    });
-
-    const totalPnL = positions.reduce((sum, pos) => sum + pos.pnl, 0);
-    const totalPositionValue = positions.reduce((sum, pos) => sum + pos.totalValue, 0);
-    const nlv = Number(account.cash_balance) + totalPositionValue;
-
-    return res.json({
-      account: {
-        cash: Number(account.cash_balance),
-        buyingPower: Number(account.buying_power),
-        netLiquidationValue: nlv,
-      },
-      positions,
-      summary: {
-        totalPnL,
-        totalPositionValue,
-      },
+    return res.status(201).json({
+      user,
+      account: accountRows[0],
+      token: signToken(user),
     });
   } catch (error) {
-    console.error("Portfolio error:", error);
-    return res.status(500).json({ error: "Failed to fetch portfolio" });
+    console.error("Register error:", error);
+    return res.status(500).json({ error: "Registration failed" });
   }
 });
 
-portfolioRouter.get("/account", async (req: any, res) => {
-  const userId = req.user?.userId;
+authRouter.post("/login", async (req, res) => {
+  const { email, password } = req.body;
 
-  if (!userId) {
-    return res.status(401).json({ error: "Unauthorized" });
+  if (!email || !password) {
+    return res.status(400).json({ error: "Email and password are required" });
   }
 
   try {
     const rows = await query(
-      `SELECT id, account_type, buying_power, net_liquidation_value, cash_balance, created_at FROM accounts WHERE user_id = $1`,
-      [userId]
+      `SELECT id, email, first_name, last_name, password_hash FROM users WHERE email = $1`,
+      [email]
     );
 
     if (!rows.length) {
-      return res.status(404).json({ error: "Account not found" });
+      return res.status(401).json({ error: "Invalid credentials" });
     }
 
-    return res.json({ account: rows[0] });
+    const user = rows[0];
+    const isValid = await bcrypt.compare(password, user.password_hash);
+
+    if (!isValid) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    const accountRows = await query(
+      `SELECT id, buying_power, net_liquidation_value, cash_balance FROM accounts WHERE user_id = $1`,
+      [user.id]
+    );
+
+    const safeUser = {
+      id: user.id,
+      email: user.email,
+      firstName: user.first_name,
+      lastName: user.last_name,
+    };
+
+    return res.json({
+      user: safeUser,
+      account: accountRows[0] || null,
+      token: signToken(safeUser),
+    });
   } catch (error) {
-    console.error("Account error:", error);
-    return res.status(500).json({ error: "Failed to fetch account" });
+    console.error("Login error:", error);
+    return res.status(500).json({ error: "Login failed" });
+  }
+});
+
+authRouter.post("/verify", (req, res) => {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+
+  if (!token) {
+    return res.status(401).json({ error: "Missing token" });
+  }
+
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET || "supersecretjwtkey");
+    return res.json({ valid: true, user: payload });
+  } catch (error) {
+    return res.status(401).json({ error: "Invalid token" });
   }
 });

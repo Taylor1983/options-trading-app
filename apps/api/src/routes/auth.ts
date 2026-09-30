@@ -1,139 +1,126 @@
-import { Router } from "express";
-import jwt from "jsonwebtoken";
-import bcrypt from "bcryptjs";
-import { query } from "../db.js";
+import { Pool } from "pg";
+import dotenv from "dotenv";
+import bcrypt from "bcrypt";
 
-export const authRouter = Router();
+dotenv.config();
 
-function signToken(user: { id: string; email: string }) {
-  return jwt.sign(
-    { userId: user.id, email: user.email },
-    process.env.JWT_SECRET || "supersecretjwtkey",
-    { expiresIn: "7d" }
-  );
+export const db = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
+});
+
+export async function query<T = any>(text: string, params?: any[]) {
+  const result = await db.query<T>(text, params ?? []);
+  return result.rows;
 }
 
-async function hashPassword(password: string): Promise<string> {
-  return bcrypt.hash(password, 10);
-}
+export async function initializeDatabase() {
+  const schema = `
+    CREATE TABLE IF NOT EXISTS users (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      email VARCHAR(255) UNIQUE NOT NULL,
+      password_hash VARCHAR(255) NOT NULL,
+      first_name VARCHAR(100),
+      last_name VARCHAR(100),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
 
-async function verifyPassword(password: string, hash: string): Promise<boolean> {
-  return bcrypt.compare(password, hash);
-}
+    CREATE TABLE IF NOT EXISTS accounts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      account_type VARCHAR(50) DEFAULT 'paper',
+      buying_power NUMERIC(18,2) DEFAULT 100000,
+      net_liquidation_value NUMERIC(18,2) DEFAULT 100000,
+      cash_balance NUMERIC(18,2) DEFAULT 100000,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
 
-authRouter.post("/register", async (req, res) => {
-  const { email, password, firstName, lastName } = req.body;
+    CREATE TABLE IF NOT EXISTS market_quotes (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      symbol VARCHAR(20) NOT NULL,
+      last_price NUMERIC(12,4),
+      bid NUMERIC(12,4),
+      ask NUMERIC(12,4),
+      volume BIGINT,
+      timestamp TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(symbol, timestamp)
+    );
 
-  if (!email || !password) {
-    return res.status(400).json({ error: "Email and password are required" });
-  }
+    CREATE TABLE IF NOT EXISTS candles (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      symbol VARCHAR(20) NOT NULL,
+      time_period VARCHAR(10),
+      open_price NUMERIC(12,4),
+      high_price NUMERIC(12,4),
+      low_price NUMERIC(12,4),
+      close_price NUMERIC(12,4),
+      volume BIGINT,
+      timestamp TIMESTAMPTZ,
+      UNIQUE(symbol, time_period, timestamp)
+    );
 
-  if (password.length < 6) {
-    return res.status(400).json({ error: "Password must be at least 6 characters" });
-  }
+    CREATE TABLE IF NOT EXISTS orders (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      symbol VARCHAR(20) NOT NULL,
+      side VARCHAR(10) NOT NULL CHECK (side IN ('BUY', 'SELL')),
+      quantity INTEGER NOT NULL CHECK (quantity > 0),
+      order_type VARCHAR(20) DEFAULT 'limit',
+      limit_price NUMERIC(18,2),
+      strategy_type VARCHAR(50),
+      status VARCHAR(20) DEFAULT 'accepted',
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS positions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      symbol VARCHAR(20) NOT NULL,
+      side VARCHAR(10) NOT NULL CHECK (side IN ('LONG', 'SHORT')),
+      quantity INTEGER NOT NULL DEFAULT 0,
+      average_cost NUMERIC(18,2) NOT NULL DEFAULT 0,
+      market_price NUMERIC(18,2) NOT NULL DEFAULT 0,
+      pnl NUMERIC(18,2) NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(user_id, symbol)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+    CREATE INDEX IF NOT EXISTS idx_accounts_user_id ON accounts(user_id);
+    CREATE INDEX IF NOT EXISTS idx_market_quotes_symbol_ts ON market_quotes(symbol, timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_candles_symbol_ts ON candles(symbol, timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_positions_user_id ON positions(user_id, symbol);
+  `;
 
   try {
-    const existingUser = await query(`SELECT id FROM users WHERE email = $1`, [email]);
+    await db.query(schema);
 
-    if (existingUser.length > 0) {
-      return res.status(409).json({ error: "Email already registered" });
-    }
+    const demoEmail = "demo@trader.app";
+    const demoPasswordHash = await bcrypt.hash("password123", 10);
 
-    const passwordHash = await hashPassword(password);
-
-    const userRows = await query(
+    await db.query(
       `INSERT INTO users (email, password_hash, first_name, last_name)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, email, first_name, last_name`,
-      [email, passwordHash, firstName || "", lastName || ""]
+       VALUES ($1, $2, 'Demo', 'Trader')
+       ON CONFLICT (email) DO NOTHING`,
+      [demoEmail, demoPasswordHash]
     );
 
-    const user = userRows[0];
-
-    const accountRows = await query(
+    await db.query(
       `INSERT INTO accounts (user_id, account_type, buying_power, net_liquidation_value, cash_balance)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, account_type, buying_power, net_liquidation_value, cash_balance`,
-      [user.id, "paper", 100000, 100000, 100000]
+       SELECT id, 'paper', 100000, 100000, 100000
+       FROM users
+       WHERE email = $1
+       AND NOT EXISTS (
+         SELECT 1 FROM accounts a WHERE a.user_id = users.id
+       )`,
+      [demoEmail]
     );
 
-    const safeUser = {
-      id: user.id,
-      email: user.email,
-      firstName: user.first_name,
-      lastName: user.last_name,
-    };
-
-    return res.status(201).json({
-      user: safeUser,
-      account: accountRows[0],
-      token: signToken(safeUser),
-    });
+    console.log("Database initialized");
   } catch (error) {
-    console.error("Register error:", error);
-    return res.status(500).json({ error: "Registration failed" });
+    console.error("Database initialization error:", error);
   }
-});
-
-authRouter.post("/login", async (req, res) => {
-  const { email, password } = req.body;
-
-  if (!email || !password) {
-    return res.status(400).json({ error: "Email and password are required" });
-  }
-
-  try {
-    const userRows = await query(
-      `SELECT id, email, first_name, last_name, password_hash FROM users WHERE email = $1`,
-      [email]
-    );
-
-    if (!userRows.length) {
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
-
-    const user = userRows[0];
-    const passwordValid = await verifyPassword(password, user.password_hash);
-
-    if (!passwordValid) {
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
-
-    const accountRows = await query(
-      `SELECT id, account_type, buying_power, net_liquidation_value, cash_balance FROM accounts WHERE user_id = $1`,
-      [user.id]
-    );
-
-    const safeUser = {
-      id: user.id,
-      email: user.email,
-      firstName: user.first_name,
-      lastName: user.last_name,
-    };
-
-    return res.json({
-      user: safeUser,
-      account: accountRows[0] || null,
-      token: signToken(safeUser),
-    });
-  } catch (error) {
-    console.error("Login error:", error);
-    return res.status(500).json({ error: "Login failed" });
-  }
-});
-
-authRouter.post("/verify", (req, res) => {
-  const header = req.headers.authorization || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
-
-  if (!token) {
-    return res.status(401).json({ error: "Missing token" });
-  }
-
-  try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET || "supersecretjwtkey");
-    return res.json({ valid: true, user: payload });
-  } catch (error) {
-    return res.status(401).json({ error: "Invalid token" });
-  }
-});
+}

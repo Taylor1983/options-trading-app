@@ -1,112 +1,65 @@
 import { Router } from "express";
+import { AuthRequest } from "../middleware/auth.js";
 import { query } from "../db.js";
 
-export const ordersRouter = Router();
+export const portfolioRouter = Router();
 
-ordersRouter.get("/history", async (req: any, res) => {
+portfolioRouter.get("/", async (req: AuthRequest, res) => {
   const userId = req.user?.userId;
 
   if (!userId) {
-    return res.status(401).json({ error: "Unauthorized" });
+    return res.status(401).json({ error: "User not authenticated" });
   }
 
   try {
-    const rows = await query(
-      `SELECT id, symbol, side, quantity, order_type, limit_price, strategy_type, status, created_at
-       FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50`,
-      [userId]
-    );
-
-    return res.json({ orders: rows });
-  } catch (error) {
-    console.error("Order history error:", error);
-    return res.status(500).json({ error: "Failed to fetch order history" });
-  }
-});
-
-ordersRouter.post("/", async (req: any, res) => {
-  const { symbol, side, quantity, orderType, limitPrice, strategyType } = req.body;
-  const userId = req.user?.userId;
-
-  if (!userId) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-
-  if (!symbol || !side || !quantity) {
-    return res.status(400).json({ error: "symbol, side, and quantity are required" });
-  }
-
-  try {
-    const qty = Number(quantity);
-    const price = Number(limitPrice || 0);
-    const cost = price * qty * 100;
-
     const accountRows = await query(
-      `SELECT cash_balance, buying_power FROM accounts WHERE user_id = $1`,
+      `SELECT id, user_id, account_type, buying_power, net_liquidation_value, cash_balance
+       FROM accounts
+       WHERE user_id = $1`,
       [userId]
     );
 
-    if (!accountRows.length) {
-      return res.status(404).json({ error: "Account not found" });
-    }
-
-    const account = accountRows[0];
-
-    if (side.toUpperCase() === "BUY" && cost > account.cash_balance) {
-      return res.status(400).json({ error: "Insufficient buying power" });
-    }
-
-    const orderRows = await query(
-      `INSERT INTO orders (user_id, symbol, side, quantity, order_type, limit_price, strategy_type, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'filled')
-       RETURNING id, symbol, side, quantity, order_type, limit_price, strategy_type, status, created_at`,
-      [userId, symbol.toUpperCase(), side.toUpperCase(), qty, orderType || "limit", price, strategyType || null]
+    const positionRows = await query(
+      `SELECT symbol, side, quantity, average_cost, market_price, pnl
+       FROM positions
+       WHERE user_id = $1
+       ORDER BY symbol ASC`,
+      [userId]
     );
 
-    const order = orderRows[0];
+    const account = accountRows[0] || {
+      id: null,
+      user_id: userId,
+      account_type: "paper",
+      buying_power: 100000,
+      net_liquidation_value: 100000,
+      cash_balance: 100000,
+    };
 
-    const existingPos = await query(
-      `SELECT * FROM positions WHERE user_id = $1 AND symbol = $2`,
-      [userId, symbol.toUpperCase()]
-    );
+    const positions = positionRows.map((position) => ({
+      symbol: position.symbol,
+      side: position.side,
+      quantity: Number(position.quantity),
+      averageCost: Number(position.average_cost || 0),
+      marketPrice: Number(position.market_price || 0),
+      pnl: Number(position.pnl || 0),
+    }));
 
-    const sideUpper = side.toUpperCase();
-
-    if (existingPos.length) {
-      const current = existingPos[0];
-      const nextQty = sideUpper === "BUY" ? current.quantity + qty : current.quantity - qty;
-      const nextAvg =
-        sideUpper === "BUY"
-          ? (current.quantity * current.average_cost + qty * price) / (current.quantity + qty || 1)
-          : current.average_cost;
-
-      await query(
-        `UPDATE positions
-         SET quantity = $1, average_cost = $2, side = $3, updated_at = NOW()
-         WHERE id = $4`,
-        [nextQty, nextAvg, nextQty >= 0 ? "LONG" : "SHORT", current.id]
-      );
-    } else {
-      await query(
-        `INSERT INTO positions (user_id, symbol, quantity, average_cost, side)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [userId, symbol.toUpperCase(), sideUpper === "BUY" ? qty : -qty, price, sideUpper === "BUY" ? "LONG" : "SHORT"]
-      );
-    }
-
-    const newCash = sideUpper === "BUY" ? account.cash_balance - cost : account.cash_balance + cost;
-    await query(
-      `UPDATE accounts SET cash_balance = $1 WHERE user_id = $2`,
-      [newCash, userId]
-    );
-
-    return res.status(201).json({
-      status: "filled",
-      order,
-      timestamp: new Date().toISOString(),
+    return res.json({
+      account: {
+        id: account.id,
+        type: account.account_type,
+        cash: Number(account.cash_balance || 0),
+        buyingPower: Number(account.buying_power || 0),
+        netLiquidationValue: Number(account.net_liquidation_value || 0),
+      },
+      accountValue: Number(account.net_liquidation_value || 0),
+      buyingPower: Number(account.buying_power || 0),
+      pnl: Number((Number(account.net_liquidation_value || 0) - 100000).toFixed(2)),
+      positions,
     });
   } catch (error) {
-    console.error("Place order error:", error);
-    return res.status(500).json({ error: "Failed to place order" });
+    console.error("Portfolio fetch error:", error);
+    return res.status(500).json({ error: "Failed to load portfolio" });
   }
 });
