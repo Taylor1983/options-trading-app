@@ -20,6 +20,15 @@ type Candle = {
   volume: number;
 };
 
+type ChainRow = {
+  strike: number;
+  optionType: "CALL" | "PUT";
+  bid: number;
+  ask: number;
+  delta: number;
+  iv: number;
+};
+
 const mockQuotes: Record<string, Quote> = {
   AAPL: { symbol: "AAPL", price: 220.12, bid: 219.98, ask: 220.26, volume: 1450000, timestamp: new Date().toISOString() },
   MSFT: { symbol: "MSFT", price: 428.91, bid: 428.48, ask: 429.14, volume: 920000, timestamp: new Date().toISOString() },
@@ -45,6 +54,21 @@ const mockCandles: Record<string, Candle[]> = {
   ],
 };
 
+const mockChain: ChainRow[] = [
+  { strike: 205, optionType: "CALL", bid: 12.4, ask: 12.9, delta: 0.61, iv: 27.8 },
+  { strike: 210, optionType: "CALL", bid: 9.8, ask: 10.2, delta: 0.57, iv: 27.4 },
+  { strike: 215, optionType: "CALL", bid: 7.15, ask: 7.5, delta: 0.51, iv: 26.9 },
+  { strike: 220, optionType: "CALL", bid: 4.95, ask: 5.28, delta: 0.46, iv: 26.3 },
+  { strike: 225, optionType: "CALL", bid: 3.12, ask: 3.5, delta: 0.41, iv: 25.9 },
+  { strike: 230, optionType: "CALL", bid: 1.9, ask: 2.18, delta: 0.36, iv: 25.7 },
+  { strike: 205, optionType: "PUT", bid: 2.2, ask: 2.5, delta: -0.39, iv: 27.8 },
+  { strike: 210, optionType: "PUT", bid: 3.1, ask: 3.4, delta: -0.43, iv: 27.4 },
+  { strike: 215, optionType: "PUT", bid: 4.7, ask: 5.1, delta: -0.49, iv: 26.9 },
+  { strike: 220, optionType: "PUT", bid: 6.9, ask: 7.3, delta: -0.54, iv: 26.3 },
+  { strike: 225, optionType: "PUT", bid: 9.3, ask: 9.8, delta: -0.59, iv: 25.9 },
+  { strike: 230, optionType: "PUT", bid: 12.5, ask: 12.9, delta: -0.64, iv: 25.7 },
+];
+
 export async function fetchQuote(symbol: string): Promise<Quote> {
   const apiKey = process.env.POLYGON_API_KEY;
 
@@ -63,8 +87,8 @@ export async function fetchQuote(symbol: string): Promise<Quote> {
       return {
         symbol,
         price: result.last?.price || 0,
-        bid: result.prevDay?.c || 0,
-        ask: result.last?.price || 0,
+        bid: result.last?.bid || 0,
+        ask: result.last?.ask || 0,
         volume: result.last?.size || 0,
         timestamp: new Date().toISOString(),
       };
@@ -85,28 +109,70 @@ export async function fetchCandles(symbol: string): Promise<Candle[]> {
 
   try {
     const response = await fetch(
-      `https://api.polygon.io/v1/open-close/${symbol}/2026-09-27?adjusted=true&apikey=${apiKey}`
+      `https://api.polygon.io/v2/aggs/ticker/${symbol}/range/1/day/2026-09-01/2026-09-27?apiKey=${apiKey}`
     );
     const data = (await response.json()) as any;
 
-    if (data.status === "OK") {
-      return [
-        {
-          symbol,
-          timestamp: data.from,
-          open: data.open,
-          high: data.high,
-          low: data.low,
-          close: data.close,
-          volume: data.volume,
-        },
-      ];
+    if (data.results && Array.isArray(data.results)) {
+      return data.results.map((row: any) => ({
+        symbol,
+        timestamp: new Date(row.t).toISOString(),
+        open: row.o,
+        high: row.h,
+        low: row.l,
+        close: row.c,
+        volume: row.v,
+      }));
     }
   } catch (error) {
-    console.error("Polygon API error:", error);
+    console.error("Polygon candles error:", error);
   }
 
   return mockCandles[symbol] || mockCandles.AAPL;
+}
+
+export async function fetchOptionChain(symbol: string) {
+  const apiKey = process.env.POLYGON_API_KEY;
+
+  if (!apiKey || apiKey === "demo") {
+    return {
+      symbol,
+      expiration: "2026-10-17",
+      chain: mockChain,
+    };
+  }
+
+  try {
+    const response = await fetch(
+      `https://api.polygon.io/v3/reference/options/contracts?underlying_ticker=${symbol}&limit=12&apiKey=${apiKey}`
+    );
+    const data = (await response.json()) as any;
+
+    if (Array.isArray(data.results)) {
+      const chain = data.results.slice(0, 12).map((row: any, idx: number) => ({
+        strike: Number(row.strike_price || 200 + idx * 5),
+        optionType: row.contract_type === "call" ? "CALL" : "PUT",
+        bid: Number(row.last_quote?.bid ?? row.bid ?? 2),
+        ask: Number(row.last_quote?.ask ?? row.ask ?? 3),
+        delta: Number(row.delta ?? (row.contract_type === "call" ? 0.45 : -0.45)),
+        iv: Number(row.implied_volatility ?? 26),
+      }));
+
+      return {
+        symbol,
+        expiration: data.results[0]?.expiration_date || "2026-10-17",
+        chain,
+      };
+    }
+  } catch (error) {
+    console.error("Polygon option chain error:", error);
+  }
+
+  return {
+    symbol,
+    expiration: "2026-10-17",
+    chain: mockChain,
+  };
 }
 
 export async function storeQuote(symbol: string, quote: Quote) {

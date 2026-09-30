@@ -13,54 +13,70 @@ import { portfolioRouter } from "./routes/portfolio.js";
 import { ordersRouter } from "./routes/orders.js";
 import { strategiesRouter } from "./routes/strategies.js";
 import { authMiddleware } from "./middleware/auth.js";
+import { fetchQuote } from "./services/marketData.js";
 
 dotenv.config();
 
 const app = express();
 const server = createServer(app);
 const port = Number(process.env.PORT || 4000);
+const trackedSymbols = ["AAPL", "MSFT", "NVDA", "SPY", "QQQ"];
 
 app.use(cors());
 app.use(express.json());
 
-// Auth routes (no middleware)
 app.use("/api/auth", authRouter);
-
-// Public routes
 app.use("/api/market", marketRouter);
 app.use("/api/greeks", greeksRouter);
 app.use("/api/quotes", quotesRouter);
 app.use("/api/options", optionsRouter);
-
-// Protected routes
 app.use("/api/portfolio", authMiddleware, portfolioRouter);
 app.use("/api/orders", authMiddleware, ordersRouter);
 app.use("/api/strategies", authMiddleware, strategiesRouter);
 
 const wss = new WebSocketServer({ server, path: "/ws" });
 
-wss.on("connection", (socket) => {
-  socket.send(
-    JSON.stringify({
-      type: "connected",
-      message: "Market feed connected",
-      timestamp: new Date().toISOString(),
+const broadcastMarketSnapshot = async () => {
+  const snapshot = await Promise.all(
+    trackedSymbols.map(async (symbol) => {
+      const quote = await fetchQuote(symbol);
+      return {
+        symbol,
+        lastPrice: quote.price,
+        bid: quote.bid,
+        ask: quote.ask,
+        volume: quote.volume,
+        timestamp: quote.timestamp,
+      };
     })
   );
+
+  wss.clients.forEach((client) => {
+    if (client.readyState === 1) {
+      client.send(JSON.stringify({ type: "market-snapshot", data: snapshot }));
+    }
+  });
+};
+
+wss.on("connection", (socket) => {
+  socket.send(JSON.stringify({ type: "connected", message: "Market feed connected", timestamp: new Date().toISOString() }));
+  void broadcastMarketSnapshot();
 
   socket.on("message", (message) => {
     try {
       const msg = JSON.parse(message.toString());
-      console.log("WebSocket message:", msg);
-
       if (msg.type === "subscribe") {
         socket.send(JSON.stringify({ type: "subscribed", symbol: msg.symbol }));
       }
-    } catch (e) {
+    } catch (error) {
       console.log("WebSocket parse error");
     }
   });
 });
+
+setInterval(() => {
+  void broadcastMarketSnapshot();
+}, 5000);
 
 initializeDatabase().then(() => {
   server.listen(port, () => {

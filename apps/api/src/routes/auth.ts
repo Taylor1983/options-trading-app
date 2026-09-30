@@ -20,10 +20,7 @@ authRouter.post("/register", async (req, res) => {
   }
 
   try {
-    const existingUser = await query(
-      `SELECT id FROM users WHERE email = $1`,
-      [email]
-    );
+    const existingUser = await query(`SELECT id FROM users WHERE email = $1`, [email]);
 
     if (existingUser.length > 0) {
       return res.status(409).json({ error: "Email already registered" });
