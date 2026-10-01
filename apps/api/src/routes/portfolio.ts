@@ -1,120 +1,91 @@
 import { Router } from "express";
-import jwt from "jsonwebtoken";
-import bcrypt from "bcrypt";
+import { AuthRequest } from "../middleware/auth.js";
 import { query } from "../db.js";
 
-export const authRouter = Router();
+export const portfolioRouter = Router();
 
-function signToken(user: { id: string; email: string }) {
-  return jwt.sign(
-    { userId: user.id, email: user.email },
-    process.env.JWT_SECRET || "supersecretjwtkey",
-    { expiresIn: "7d" }
-  );
-}
+portfolioRouter.get("/", async (req: AuthRequest, res) => {
+  const userId = req.user?.userId;
 
-authRouter.post("/register", async (req, res) => {
-  const { email, password, firstName, lastName } = req.body;
-
-  if (!email || !password) {
-    return res.status(400).json({ error: "Email and password are required" });
+  if (!userId) {
+    return res.status(401).json({ error: "User not authenticated" });
   }
 
   try {
-    const existingUser = await query(`SELECT id FROM users WHERE email = $1`, [email]);
-
-    if (existingUser.length > 0) {
-      return res.status(409).json({ error: "Email already registered" });
-    }
-
-    const passwordHash = await bcrypt.hash(password, 10);
-
-    const rows = await query(
-      `INSERT INTO users (email, password_hash, first_name, last_name)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, email, first_name, last_name`,
-      [email, passwordHash, firstName || "", lastName || ""]
-    );
-
-    const user = rows[0];
-
     const accountRows = await query(
-      `INSERT INTO accounts (user_id, account_type, buying_power, net_liquidation_value, cash_balance)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id`,
-      [user.id, "paper", 100000, 100000, 100000]
+      `SELECT id, user_id, account_type, buying_power, net_liquidation_value, cash_balance
+       FROM accounts
+       WHERE user_id = $1`,
+      [userId]
     );
 
-    return res.status(201).json({
-      user,
-      account: accountRows[0],
-      token: signToken(user),
+    const positionRows = await query(
+      `SELECT symbol, side, quantity, average_cost, market_price, pnl
+       FROM positions
+       WHERE user_id = $1
+       ORDER BY symbol ASC`,
+      [userId]
+    );
+
+    const account = accountRows[0] || {
+      id: null,
+      user_id: userId,
+      account_type: "paper",
+      buying_power: 100000,
+      net_liquidation_value: 100000,
+      cash_balance: 100000,
+    };
+
+    const positions = positionRows.map((position: any) => ({
+      symbol: position.symbol,
+      side: position.side,
+      quantity: Number(position.quantity),
+      averageCost: Number(position.average_cost || 0),
+      marketPrice: Number(position.market_price || 0),
+      pnl: Number(position.pnl || 0),
+    }));
+
+    return res.json({
+      account: {
+        id: account.id,
+        type: account.account_type,
+        cash: Number(account.cash_balance || 0),
+        buyingPower: Number(account.buying_power || 0),
+        netLiquidationValue: Number(account.net_liquidation_value || 0),
+      },
+      accountValue: Number(account.net_liquidation_value || 0),
+      buyingPower: Number(account.buying_power || 0),
+      pnl: Number((Number(account.net_liquidation_value || 0) - 100000).toFixed(2)),
+      positions,
     });
   } catch (error) {
-    console.error("Register error:", error);
-    return res.status(500).json({ error: "Registration failed" });
+    console.error("Portfolio fetch error:", error);
+    return res.status(500).json({ error: "Failed to load portfolio" });
   }
 });
 
-authRouter.post("/login", async (req, res) => {
-  const { email, password } = req.body;
+portfolioRouter.get("/account", async (req: AuthRequest, res) => {
+  const userId = req.user?.userId;
 
-  if (!email || !password) {
-    return res.status(400).json({ error: "Email and password are required" });
+  if (!userId) {
+    return res.status(401).json({ error: "User not authenticated" });
   }
 
   try {
     const rows = await query(
-      `SELECT id, email, first_name, last_name, password_hash FROM users WHERE email = $1`,
-      [email]
+      `SELECT id, account_type, buying_power, net_liquidation_value, cash_balance, created_at
+       FROM accounts
+       WHERE user_id = $1`,
+      [userId]
     );
 
     if (!rows.length) {
-      return res.status(401).json({ error: "Invalid credentials" });
+      return res.status(404).json({ error: "Account not found" });
     }
 
-    const user = rows[0];
-    const isValid = await bcrypt.compare(password, user.password_hash);
-
-    if (!isValid) {
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
-
-    const accountRows = await query(
-      `SELECT id, buying_power, net_liquidation_value, cash_balance FROM accounts WHERE user_id = $1`,
-      [user.id]
-    );
-
-    const safeUser = {
-      id: user.id,
-      email: user.email,
-      firstName: user.first_name,
-      lastName: user.last_name,
-    };
-
-    return res.json({
-      user: safeUser,
-      account: accountRows[0] || null,
-      token: signToken(safeUser),
-    });
+    return res.json({ account: rows[0] });
   } catch (error) {
-    console.error("Login error:", error);
-    return res.status(500).json({ error: "Login failed" });
-  }
-});
-
-authRouter.post("/verify", (req, res) => {
-  const header = req.headers.authorization || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
-
-  if (!token) {
-    return res.status(401).json({ error: "Missing token" });
-  }
-
-  try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET || "supersecretjwtkey");
-    return res.json({ valid: true, user: payload });
-  } catch (error) {
-    return res.status(401).json({ error: "Invalid token" });
+    console.error("Account fetch error:", error);
+    return res.status(500).json({ error: "Failed to load account" });
   }
 });
